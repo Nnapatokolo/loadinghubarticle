@@ -1,17 +1,16 @@
-from flask import Flask, render_template, request, jsonify
+import zipfile
+from flask import Flask, render_template, request, jsonify, send_from_directory, url_for
 import os
 from image_utils import resize_image
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__, static_url_path='/static')
 app.secret_key = "supersecretkey"
 
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'}
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'}
 
 # Size and suffix mappings
 CATEGORY_SIZES = {
@@ -33,6 +32,9 @@ CATEGORY_SIZES = {
     }
 }
 
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -47,7 +49,7 @@ def upload_image():
         return jsonify({"error": "No file part"}), 400
 
     file = request.files['image']
-    output_dir = request.form['output_dir']
+    output_dir = secure_filename(request.form['output_dir'])  # Ensure directory name is secure
     categories = request.form.getlist('categories[]')
 
     if file.filename == '':
@@ -57,17 +59,37 @@ def upload_image():
         input_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
         file.save(input_path)
 
+        output_folder = os.path.join(app.config['UPLOAD_FOLDER'], output_dir)
+        os.makedirs(output_folder, exist_ok=True)
+
         try:
-            # Process selected categories and resize images
+            resized_files = []
             for category in categories:
                 sizes = CATEGORY_SIZES.get(category, {})
                 for size, suffixes in sizes.items():
-                    resize_image(input_path, output_dir, size, suffixes)
-            return jsonify({"message": "Images resized and saved successfully!"}), 200
+                    resize_image(input_path, output_folder, size, suffixes)
+                    for suffix in suffixes:
+                        resized_files.append(os.path.join(output_folder, suffix))
+            
+            # Create a ZIP file containing all resized images
+            zip_filename = f"{output_dir}.zip"
+            zip_filepath = os.path.join(app.config['UPLOAD_FOLDER'], zip_filename)
+            with zipfile.ZipFile(zip_filepath, 'w') as zipf:
+                for file in resized_files:
+                    zipf.write(file, os.path.relpath(file, output_folder))
+            
+            download_link = url_for('download_file', filename=zip_filename)
+            return jsonify({
+                "message": "Images resized and saved successfully!",
+                "download_link": download_link
+            }), 200
         except Exception as e:
             return jsonify({"error": f"An error occurred: {e}"}), 500
+
+@app.route('/download/<path:filename>', methods=['GET'])
+def download_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=True)
 
 if __name__ == '__main__':
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     app.run(debug=True)
-
